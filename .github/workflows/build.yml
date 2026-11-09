@@ -18,7 +18,8 @@ on:
         required: true
       tools:
         description: The branch of starling-client/starling with the build scripts
-        default: starling
+        # Until starling-client/starling#349 is merged, the scripts are only on its branch.
+        default: gateway-github
 permissions:
   contents: read
 jobs:
