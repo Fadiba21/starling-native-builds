@@ -32,7 +32,7 @@ jobs:
       - name: Rust, the Android tools and the crates
         run: bash scripts/tools.sh
       - name: Make room
-        run: bash scripts/room.sh
+        run: bash scripts/room.sh clean
       - name: Build
         env:
           MOD_BUILD_BASE: '1'

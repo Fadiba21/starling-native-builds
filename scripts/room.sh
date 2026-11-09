@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# What the runner comes with and these builds don't use, and swap: the game's fast profile can want more
-# than the runner's memory. Disk space is what runs out first without this.
+# Swap, as the game's fast profile can want more than the runner's memory, and with `clean` the room
+# the runner's preinstalled tools take. A player's build skips the clean: the runner has disk enough, and
+# deleting them takes minutes.
 set -euo pipefail
 
-sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
-  /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell /usr/share/swift
+if [ "${1:-}" = clean ]; then
+  sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+    /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/local/share/powershell /usr/share/swift
+fi
 
 where=/mnt
 avail=$(df --output=avail -BG "$where" 2>/dev/null | tail -1 | tr -dc 0-9)
