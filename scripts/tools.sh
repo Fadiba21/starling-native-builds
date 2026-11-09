@@ -12,8 +12,11 @@ curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
 . "$HOME/.cargo/env"
 cargo install cargo-ndk --version 3.5.4 --locked
 
-yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$HOME/android" --install \
-  "build-tools;35.0.0" "platforms;android-36" "ndk;28.2.13676358" > /dev/null
+# `yes` ends on a broken pipe when the licenses are all taken, which pipefail would count as a failure.
+(yes || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$HOME/android" \
+  --install "build-tools;35.0.0" "platforms;android-36" "ndk;28.2.13676358" | tail -3
+ls "$HOME/android/ndk/28.2.13676358/toolchains" "$HOME/android/build-tools/35.0.0/aapt2" \
+  "$HOME/android/platforms/android-36/android.jar"
 
 rev=$(sed -n 's/^MIXINS_REV=//p' "$root/source/packaging/android/native_build.sh")
 git_url=$(sed -n 's/^MIXINS_GIT=//p' "$root/source/packaging/android/native_build.sh")
