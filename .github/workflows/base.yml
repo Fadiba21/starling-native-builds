@@ -1,0 +1,56 @@
+name: base
+run-name: base ${{ inputs.version }}
+# The clean build cache of one version of the game, which every player's build starts from (build.yml):
+# the game at that version's commit, built with the one mod in its own repository. Only trusted code runs
+# here, and only here is the cache written. Run it once per release, after adding the version to
+# versions.json.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: A version in versions.json
+        required: true
+      tools:
+        description: The branch of starling-client/starling with the build scripts
+        default: starling
+permissions:
+  contents: read
+concurrency: base-${{ inputs.version }}
+jobs:
+  base:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      VERSION: ${{ inputs.version }}
+      TOOLS: ${{ inputs.tools }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: The commit and the scripts
+        run: bash scripts/prepare.sh
+      - name: Rust, the Android tools and the crates
+        run: bash scripts/tools.sh
+      - name: Make room
+        run: bash scripts/room.sh
+      - name: Build
+        env:
+          MOD_BUILD_BASE: '1'
+          MOD_BUILD_SECONDS: '14000'
+        run: |
+          job=$HOME/modbuild/jobs/base
+          mkdir -p "$job/out" "$job/mods"
+          cp -r "$HOME/modbuild/source/native-mods/wrench/mixins/wrench" "$job/mods/wrench"
+          started=$(date +%s)
+          bash tools/mod_build_sandbox.sh "$HOME/modbuild" "$COMMIT" "$job"
+          echo "Cold build: $(( $(date +%s) - started )) s"
+          du -sh "$HOME/modbuild/base" "$HOME/modbuild/cargo" "$HOME/android" "$HOME/.rustup"
+          sudo rm -rf "$job"
+      - uses: actions/cache/save@v4
+        with:
+          key: base-${{ env.COMMIT }}
+          path: |
+            ~/.rustup
+            ~/android
+            ~/modbuild/cargo
+            ~/modbuild/base

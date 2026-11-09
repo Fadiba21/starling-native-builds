@@ -1,0 +1,64 @@
+name: build
+run-name: build ${{ inputs.ask }}
+# One player's native mods, asked for through Starling's gateway (mod_build_gateway.py in
+# starling-client/starling): the mods come from the gateway under a random name, compile in the sandbox
+# with no network, and the result goes back as this run's artifact. A mod's code runs while it compiles,
+# so its token can only read this public repository, and it writes no cache.
+on:
+  workflow_dispatch:
+    inputs:
+      ask:
+        description: The name the gateway keeps the mods under
+        required: true
+      version:
+        description: A version in versions.json
+        required: true
+      gateway:
+        description: Where the gateway is
+        required: true
+      tools:
+        description: The branch of starling-client/starling with the build scripts
+        default: starling
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    env:
+      VERSION: ${{ inputs.version }}
+      TOOLS: ${{ inputs.tools }}
+      ASK: ${{ inputs.ask }}
+      GATEWAY: ${{ inputs.gateway }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: The commit and the scripts
+        run: bash scripts/prepare.sh
+      - name: Make room
+        run: |
+          rm -rf "$HOME/.rustup" "$HOME/.cargo"
+          bash scripts/room.sh
+      - uses: actions/cache/restore@v4
+        with:
+          key: base-${{ env.COMMIT }}
+          fail-on-cache-miss: true
+          path: |
+            ~/.rustup
+            ~/android
+            ~/modbuild/cargo
+            ~/modbuild/base
+      - name: The mods
+        run: curl -fsS --retry 5 --retry-all-errors -o mods.bin "$GATEWAY/v1/github/$ASK"
+      - name: Build
+        env:
+          MOD_BUILD_SECONDS: '3200'
+        run: python3 tools/mod_build_once.py mods.bin "$COMMIT" result
+      - uses: actions/upload-artifact@v4
+        with:
+          name: result
+          path: result/
+          retention-days: 1
+          compression-level: 1
+          if-no-files-found: error
