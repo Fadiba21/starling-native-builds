@@ -12,6 +12,8 @@ from native_mod_source_compat import (  # noqa: E402
     ACTION_BUTTON_SHIM,
     ACTION_SHIM,
     OPTION_NAME_VALUE_SHIM,
+    PAINT_CACHE_SHIM,
+    SCREEN_BLUR_SHIM,
     patch_source_compat,
 )
 from patch_native_mod_adapter import (  # noqa: E402
@@ -116,7 +118,9 @@ class NativeModAdapterPatchTests(unittest.TestCase):
         ui = source / "crates/horizon-client-render/src/ui.rs"
         text = source / "crates/horizon-client-core/src/text.rs"
         remote = source / "crates/horizon-client/src/game/remote.rs"
-        for path in (widgets, ui, text, remote):
+        debug_overlay = source / "crates/horizon-client/src/debug_overlay.rs"
+        native_hooks = source / "crates/horizon-client/src/game/native_hooks.rs"
+        for path in (widgets, ui, text, remote, debug_overlay, native_hooks):
             path.parent.mkdir(parents=True, exist_ok=True)
         widgets.write_text(
             "/// A labelled widget in GUI pixels (the coordinates screens take input in).\n"
@@ -136,25 +140,33 @@ class NativeModAdapterPatchTests(unittest.TestCase):
             '    fn menu_slot(menu: &str, slot: i32) -> Option<usize> {\n',
             encoding="utf-8",
         )
-        return widgets, ui, text, remote
+        debug_overlay.write_text(
+            "/// What the enabled entries reported (`DebugScreenDisplayer`).\n",
+            encoding="utf-8",
+        )
+        native_hooks.write_text(
+            "    pub(super) fn native_compute_fov_modifier(\n",
+            encoding="utf-8",
+        )
+        return widgets, ui, text, remote, debug_overlay, native_hooks
 
     def test_source_compatibility_shims_are_installed_once(self):
         with tempfile.TemporaryDirectory() as directory:
             source = pathlib.Path(directory)
-            widgets, ui, text, remote = self._make_staged_source(source)
+            widgets, ui, text, remote, debug_overlay, native_hooks = self._make_staged_source(source)
 
             self.assertTrue(patch_source_compat(source))
             self.assertIn(ACTION_SHIM, widgets.read_text(encoding="utf-8"))
             self.assertIn(ACTION_BUTTON_SHIM, ui.read_text(encoding="utf-8"))
             self.assertIn(OPTION_NAME_VALUE_SHIM, text.read_text(encoding="utf-8"))
             self.assertIn("pub(super) fn menu_slot(", remote.read_text(encoding="utf-8"))
+            self.assertIn(PAINT_CACHE_SHIM, debug_overlay.read_text(encoding="utf-8"))
+            self.assertIn(SCREEN_BLUR_SHIM, native_hooks.read_text(encoding="utf-8"))
 
-            snapshots = [path.read_text(encoding="utf-8") for path in (widgets, ui, text, remote)]
+            paths = (widgets, ui, text, remote, debug_overlay, native_hooks)
+            snapshots = [path.read_text(encoding="utf-8") for path in paths]
             self.assertFalse(patch_source_compat(source))
-            self.assertEqual(
-                snapshots,
-                [path.read_text(encoding="utf-8") for path in (widgets, ui, text, remote)],
-            )
+            self.assertEqual(snapshots, [path.read_text(encoding="utf-8") for path in paths])
 
     def test_adapter_applies_shims_to_the_staged_source_archive(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -163,7 +175,7 @@ class NativeModAdapterPatchTests(unittest.TestCase):
             adapter.parent.mkdir(parents=True)
             adapter.write_text(ADAPTER_FIXTURE, encoding="utf-8")
             staged = root / "staged-archive"
-            widgets, ui, text, remote = self._make_staged_source(staged)
+            widgets, ui, text, remote, debug_overlay, native_hooks = self._make_staged_source(staged)
             mods = root / "mods"
             mods.mkdir()
 
@@ -181,6 +193,8 @@ class NativeModAdapterPatchTests(unittest.TestCase):
             self.assertIn(ACTION_BUTTON_SHIM, ui.read_text(encoding="utf-8"))
             self.assertIn(OPTION_NAME_VALUE_SHIM, text.read_text(encoding="utf-8"))
             self.assertIn("pub(super) fn menu_slot(", remote.read_text(encoding="utf-8"))
+            self.assertIn(PAINT_CACHE_SHIM, debug_overlay.read_text(encoding="utf-8"))
+            self.assertIn(SCREEN_BLUR_SHIM, native_hooks.read_text(encoding="utf-8"))
 
     def test_installs_sandbox_hook_after_source_checkout_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as directory:
