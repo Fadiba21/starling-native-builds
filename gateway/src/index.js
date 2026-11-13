@@ -1,7 +1,8 @@
 const CHUNK_BYTES = 1024 * 1024;
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
-const MAX_LIBRARY_BYTES = 96 * 1024 * 1024;
-const MAX_QUEUE = 2;
+const MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
+const MAX_ACTIVE_BUILDS = 14;
+const MAX_RETAINED_BYTES = 4_500_000_000;
 const TTL_MS = 24 * 60 * 60 * 1000;
 const STALE_LEASE_MS = 80 * 60 * 1000;
 const JOB_ID = /^[0-9a-f]{24}$/;
@@ -12,6 +13,19 @@ const VERSIONS = Object.freeze({
 });
 
 const encoder = new TextEncoder();
+const ACTIVE_JOB_STATES = new Set(["waiting", "queued", "dispatching", "building", "uploading"]);
+
+function reservedPayloadBytes(jobs) {
+  let total = 0;
+  for (const job of jobs) {
+    const source = Number.isSafeInteger(job.source_bytes) && job.source_bytes > 0 ? job.source_bytes : 0;
+    const output = job.state === "done"
+      ? (Number.isSafeInteger(job.library_size) && job.library_size > 0 ? job.library_size : 0)
+      : ACTIVE_JOB_STATES.has(job.state) ? MAX_LIBRARY_BYTES : 0;
+    total += source + output;
+  }
+  return total;
+}
 
 function json(value, status = 200, extra = {}) {
   return new Response(JSON.stringify(value), {
@@ -83,7 +97,8 @@ function authorized(request, env) {
   return mismatch === 0;
 }
 
-async function dispatchNext(env, origin) {
+async function dispatchNext(env, origin, attempts = 0) {
+  if (attempts >= MAX_ACTIVE_BUILDS) return;
   const claim = await callStore(env, "/internal/claim");
   const job = await claim.json();
   if (!job.job) return;
@@ -92,7 +107,7 @@ async function dispatchNext(env, origin) {
     await callStore(env, `/internal/dispatch-result/${job.job}`, {
       method: "POST", body: JSON.stringify({ ok: false, error: "GitHub dispatch is not configured." }),
     });
-    return dispatchNext(env, origin);
+    return;
   }
   const repo = env.GITHUB_REPOSITORY || "Fadiba21/starling-native-builds";
   const workflow = env.GITHUB_WORKFLOW || "build.yml";
@@ -126,17 +141,20 @@ async function dispatchNext(env, origin) {
     await callStore(env, `/internal/dispatch-result/${job.job}`, {
       method: "POST", body: JSON.stringify({ ok: true }),
     });
-    return;
+    return dispatchNext(env, origin, attempts + 1);
   }
   await callStore(env, `/internal/dispatch-result/${job.job}`, {
     method: "POST", body: JSON.stringify({ ok: false, error: "GitHub Actions could not accept the build." }),
   });
-  // A failed dispatch frees the single runner slot. Continue through bounded queued work.
-  return dispatchNext(env, origin);
+  // A failed dispatch frees a runner slot; continue through bounded queued work.
+  return dispatchNext(env, origin, attempts + 1);
 }
 
 async function publicRoute(request, env, url) {
   const path = url.pathname;
+  if (request.method === "GET" && (path === "/" || path === "/health")) {
+    return json({ ok: true, service: "starling-native-gateway" });
+  }
   if (request.method === "POST" && path === "/v1/build") {
     const version = url.searchParams.get("version") || "";
     const commit = VERSIONS[version];
@@ -147,8 +165,6 @@ async function publicRoute(request, env, url) {
     canonical.set(prefix);
     canonical.set(body, prefix.byteLength);
     const id = (await sha256(canonical)).slice(0, 24);
-    const ip = request.headers.get("cf-connecting-ip") || "unknown";
-    const ipHash = (await sha256(encoder.encode(ip))).slice(0, 32);
     const result = await callStore(env, "/internal/create", {
       method: "POST",
       headers: {
@@ -156,7 +172,6 @@ async function publicRoute(request, env, url) {
         "x-job-id": id,
         "x-version": version,
         "x-commit": commit,
-        "x-ip-hash": ipHash,
       },
       body,
     });
@@ -274,7 +289,6 @@ export class GatewayState {
     const id = request.headers.get("x-job-id");
     const version = request.headers.get("x-version");
     const commit = request.headers.get("x-commit");
-    const ipHash = request.headers.get("x-ip-hash") || "unknown";
     if (!JOB_ID.test(id || "") || !VERSIONS[version] || VERSIONS[version] !== commit || bytes.length < 1 || bytes.length > MAX_REQUEST_BYTES) return json({ error: "Invalid build request." }, 400);
     return this.state.blockConcurrencyWhile(async () => {
       await this.cleanupExpired();
@@ -282,17 +296,15 @@ export class GatewayState {
       if (old) return json({ created: false, job: id });
       const now = Date.now();
       const jobs = await this.storage.list({ prefix: "job:" });
-      const activeRecent = Array.from(jobs.values()).filter((job) => job.created_at > now - TTL_MS);
-      if (activeRecent.length >= 3) return json({ error: "The build gateway has reached today's build limit. Try again tomorrow." }, 429);
-      if (activeRecent.filter((job) => job.ip_hash === ipHash).length >= 2) return json({ error: "You have reached today's build limit. Try again tomorrow." }, 429);
-      if (activeRecent.filter((job) => ["waiting", "queued", "dispatching", "building", "uploading"].includes(job.state)).length >= MAX_QUEUE + 1) {
-        return json({ error: "The build gateway is full. Try again in a few minutes." }, 429);
+      const retained = reservedPayloadBytes(jobs.values());
+      if (retained + bytes.length + MAX_LIBRARY_BYTES > MAX_RETAINED_BYTES) {
+        return json({ error: "The free-tier build storage is full. Retry after earlier build data expires." }, 429);
       }
       const ask = hex(crypto.getRandomValues(new Uint8Array(16)));
       const count = Math.ceil(bytes.length / CHUNK_BYTES);
       const job = {
         id, ask, version, state: "waiting", created_at: now, expires_at: now + TTL_MS,
-        ip_hash: ipHash, source_bytes: bytes.length, source_chunks: count,
+        source_bytes: bytes.length, source_chunks: count,
         library_size: null, library_sha256: null, build: null, error: null, started_at: null,
       };
       await this.storage.put(`job:${id}`, job);
@@ -309,7 +321,7 @@ export class GatewayState {
       await this.cleanupExpired();
       await this.reapStaleUnlocked();
       const jobs = Array.from((await this.storage.list({ prefix: "job:" })).values()).sort((a, b) => a.created_at - b.created_at);
-      if (jobs.some((job) => ["dispatching", "queued", "building", "uploading"].includes(job.state))) return json({ job: null });
+      if (jobs.filter((job) => ["dispatching", "queued", "building", "uploading"].includes(job.state)).length >= MAX_ACTIVE_BUILDS) return json({ job: null });
       const next = jobs.find((job) => job.state === "waiting");
       if (!next) return json({ job: null });
       next.state = "dispatching";
@@ -659,4 +671,4 @@ const SHA256_K = new Uint32Array([
   0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
 ]);
 
-export const __test = { Sha256, CHUNK_BYTES, MAX_REQUEST_BYTES, MAX_LIBRARY_BYTES, STALE_LEASE_MS, VERSIONS, boundedBytes };
+export const __test = { Sha256, CHUNK_BYTES, MAX_REQUEST_BYTES, MAX_LIBRARY_BYTES, MAX_ACTIVE_BUILDS, MAX_RETAINED_BYTES, STALE_LEASE_MS, VERSIONS, boundedBytes };

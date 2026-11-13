@@ -157,16 +157,21 @@ test("source fetch auth, build dispatch, callback auth, verified raw library and
   }
   const busy = await worker.fetch(new Request("https://gateway.test/v1/busy"), f.env);
   assert.deepEqual(await busy.json(), { busy: false });
+  const health = await worker.fetch(new Request("https://gateway.test/health"), f.env);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true, service: "starling-native-gateway" });
 });
 
-test("only one dispatched build runs; at most 3 builds/day and 2 per IP", async (t) => {
+test("no daily, per-IP, or fixed queue-count cap; up to 14 jobs dispatch in parallel", async (t) => {
   const f = fixture();
   t.after(f.restore);
-  const first = await (await buildRequest(f.env, bundleBody("mod-one"), "192.0.2.1")).json();
-  const secondResponse = await buildRequest(f.env, bundleBody("mod-two"), "192.0.2.2");
-  assert.equal(secondResponse.status, 200);
-  const second = await secondResponse.json();
-  assert.equal(f.dispatches.length, 1, "second job waits while the first owns the runner slot");
+  const jobs = [];
+  for (let i = 0; i < __test.MAX_ACTIVE_BUILDS + 1; i++) {
+    const response = await buildRequest(f.env, bundleBody(`mod-${i}`), "192.0.2.1");
+    assert.equal(response.status, 200, `build ${i} should be accepted for the same IP`);
+    jobs.push(await response.json());
+  }
+  assert.equal(f.dispatches.length, __test.MAX_ACTIVE_BUILDS, "the free-tier runner slots fill in parallel");
   assert.deepEqual(await (await worker.fetch(new Request("https://gateway.test/v1/busy"), f.env)).json(), { busy: true });
 
   const ask1 = f.dispatches[0].payload.inputs.ask;
@@ -174,18 +179,26 @@ test("only one dispatched build runs; at most 3 builds/day and 2 per IP", async 
   await uploadPart(f.env, ask1, 0, result);
   const done1 = await callback(f.env, ask1, { state: "done", sha256: digest(result), size: result.length, build: {}, parts: 1, chunk_size: __test.CHUNK_BYTES });
   assert.equal(done1.status, 200);
-  assert.equal(f.dispatches.length, 2, "completion dispatches the next waiting job");
-  assert.equal(f.dispatches[1].payload.inputs.ask !== ask1, true);
+  assert.equal(f.dispatches.length, __test.MAX_ACTIVE_BUILDS + 1, "completion dispatches the next waiting job");
+  assert.notEqual(f.dispatches.at(-1).payload.inputs.ask, ask1);
+  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/job/${jobs[0].job}`), f.env)).status, 200);
+  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/job/${jobs.at(-1).job}`), f.env)).status, 200);
+});
 
-  const thirdResponse = await buildRequest(f.env, bundleBody("mod-three"), "192.0.2.3");
-  assert.equal(thirdResponse.status, 200);
-  const perIpLimit = await buildRequest(f.env, bundleBody("mod-four"), "192.0.2.1");
-  assert.equal(perIpLimit.status, 429);
-  const dailyLimit = await buildRequest(f.env, bundleBody("mod-five"), "192.0.2.5");
-  assert.equal(dailyLimit.status, 429);
-  assert.equal(f.dispatches.length, 2);
-  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/job/${first.job}`), f.env)).status, 200);
-  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/job/${second.job}`), f.env)).status, 200);
+test("new builds are rejected only when the free-tier retained-storage budget is exhausted", async (t) => {
+  const f = fixture();
+  t.after(f.restore);
+  const now = Date.now();
+  f.storage.values.set("job:storage-full", {
+    id: "storage-full", ask: "a".repeat(32), version: "0.8.0", state: "queued",
+    created_at: now, expires_at: now + 60_000,
+    source_bytes: __test.MAX_RETAINED_BYTES - __test.MAX_LIBRARY_BYTES,
+    source_chunks: 0, library_size: null,
+  });
+  const response = await buildRequest(f.env, bundleBody("one-more"));
+  assert.equal(response.status, 429);
+  assert.match((await response.json()).error, /free-tier build storage is full/i);
+  assert.equal(f.dispatches.length, 0);
 });
 
 test("unknown versions are refused and failed uploads cannot become done without SHA verification", async (t) => {
@@ -222,10 +235,10 @@ test("stale runner leases are reaped and both public status and busy kick the ne
   const f = fixture();
   t.after(f.restore);
   const jobs = [];
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < __test.MAX_ACTIVE_BUILDS + 2; i++) {
     jobs.push(await (await buildRequest(f.env, bundleBody(`lease-${i}`), `192.0.2.${20 + i}`)).json());
   }
-  assert.equal(f.dispatches.length, 1);
+  assert.equal(f.dispatches.length, __test.MAX_ACTIVE_BUILDS);
 
   const staleBefore = Date.now() - __test.STALE_LEASE_MS - 1;
   const firstRecord = f.storage.values.get(`job:${jobs[0].job}`);
@@ -233,7 +246,7 @@ test("stale runner leases are reaped and both public status and busy kick the ne
   await f.storage.put(`job:${jobs[0].job}`, firstRecord);
   const status = await worker.fetch(new Request(`https://gateway.test/v1/job/${jobs[0].job}`), f.env);
   assert.deepEqual(await status.json(), { state: "failed", error: "The build runner timed out before completing this job.", settled: false });
-  assert.equal(f.dispatches.length, 2, "status reaps the stale slot and dispatches the next waiting job");
+  assert.equal(f.dispatches.length, __test.MAX_ACTIVE_BUILDS + 1, "status reaps a stale slot and dispatches the next waiting job");
 
   const secondAsk = f.dispatches[1].payload.inputs.ask;
   const secondRecord = [...f.storage.values.entries()].find(([key, value]) => key.startsWith("job:") && value.ask === secondAsk)[1];
@@ -241,7 +254,7 @@ test("stale runner leases are reaped and both public status and busy kick the ne
   await f.storage.put(`job:${secondRecord.id}`, secondRecord);
   const busy = await worker.fetch(new Request("https://gateway.test/v1/busy"), f.env);
   assert.deepEqual(await busy.json(), { busy: true });
-  assert.equal(f.dispatches.length, 3, "busy reaps another stale slot and dispatches the remaining queued job");
+  assert.equal(f.dispatches.length, __test.MAX_ACTIVE_BUILDS + 2, "busy reaps another stale slot and dispatches the remaining queued job");
   const secondStatus = await worker.fetch(new Request(`https://gateway.test/v1/job/${secondRecord.id}`), f.env);
   assert.equal((await secondStatus.json()).error, "The build runner timed out before completing this job.");
 });
