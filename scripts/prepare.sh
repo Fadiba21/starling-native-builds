@@ -26,6 +26,7 @@ mkdir -p "$root/jobs" "$root/base"
 git init -q "$root/source"
 git -C "$root/source" fetch -q --depth 1 https://github.com/starling-client/starling "$COMMIT"
 git -C "$root/source" checkout -q --detach FETCH_HEAD
+python3 scripts/patch_native_mod_adapter.py --install-sandbox-hook tools/mod_build_sandbox.sh
 
 # What the build reads when it starts, in the sandbox's home.
 cat > "$HOME/.profile" <<'EOF'

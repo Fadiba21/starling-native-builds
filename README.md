@@ -2,6 +2,8 @@
 
 This repository draft adapts the public [`starling-client/mod-builds`](https://github.com/starling-client/mod-builds) source (upstream snapshot `869989193102c33a061314eabf5b0a7b6c3442b3`) for the public `Fadiba21/starling-native-builds` repository. The trusted base-cache workflow and upstream `scripts/`/`versions.json` are retained. `build.yml` keeps the upstream `mod_build_once.py` → `mod_build_sandbox.sh` route; native mod compilation runs in the upstream isolated, no-network sandbox. Checkout does not persist credentials, repository permissions are read-only, and `GATEWAY_UPLOAD_KEY` is scoped to the trusted source-fetch and post-build callback/upload steps, never the compiler sandbox.
 
+Before each sandboxed build, the trusted runner adds two exact compatibility aliases to Starling's native-mod adapter: Horizonmatica 0.3.2's old `play_input::Game::play_mouse` and `pointer_capture::Game::pauses_game` target IDs point to the corresponding methods now on `game::Game`. The mod bundle, hook kinds, and bindings are left unchanged.
+
 ## Gateway interface implemented
 
 `workflow_dispatch` takes `ask`, `version`, `gateway`, and `tools`. The ask must be exactly 32 lowercase hexadecimal characters; version must be present in `versions.json`; gateway must be an HTTPS origin without a path/query; and `tools` must be a valid upstream Git branch name. Values are read from environment variables and validated before they're used. `GET /v1/github/{ASK}` returns the original binary mods input only with `Authorization: Bearer $GATEWAY_UPLOAD_KEY`; the fetch step receives the secret locally and does not pass it into compilation.
