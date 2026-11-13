@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Install narrow compatibility aliases and API shims for Starling 0.8.0 builds."""
+"""Install narrow compatibility aliases and staged-source shims for Starling 0.8.0 builds."""
 from __future__ import annotations
 
 import ast
 import pathlib
 import sys
+
+from native_mod_source_compat import patch_source_compat
 
 ALIASES = {
     "horizon_client::game::play_input::Game<'_>::play_mouse":
@@ -31,38 +33,13 @@ HOOK_LINE = (
     'python3 "${GITHUB_WORKSPACE:?}/scripts/patch_native_mod_adapter.py" '
     '"$root/source/packaging/android/native_mod_adapt.py"'
 )
-
-ACTION_SHIM = '''/// Compatibility for native mods using Horizon's former completion button.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Action {
-    Done,
-}
-
-'''
-ACTION_BUTTON_SHIM = '''/// Compatibility helper for older native-mod settings screens.
-/// The screen's own input handler remains responsible for dispatching its action.
-#[allow(clippy::too_many_arguments)]
-pub fn action_button(
-    batch: &mut HudBatch,
-    atlas: &HudAtlas,
-    _action: crate::widgets::Action,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    label: &Text,
-    active: bool,
-    hover: bool,
-) {
-    button(batch, atlas, x, y, w, h, label, active, hover);
-}
-
-'''
-OPTION_NAME_VALUE_SHIM = '''    /// Compatibility for native mods using the former option label formatter.
-    pub fn option_name_value(name: Self, value: Self) -> Self {
-        name.append(": ").append(value)
-    }
-'''
+IMPORT_ANCHOR = "import sys\n"
+SHIM_IMPORT = "from native_mod_source_compat import patch_source_compat\n"
+MAIN_SOURCE_ANCHOR = (
+    "    source, mods = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+)
+SHIM_CALL = "    patch_source_compat(source)\n"
+SOURCE_HELPER_RELATIVE = pathlib.Path("packaging/android/native_mod_source_compat.py")
 
 
 def _top_level_assignment(tree: ast.Module, name: str, path: pathlib.Path) -> ast.Assign:
@@ -92,8 +69,17 @@ def _replace_assignments(
     return text
 
 
+def _insert_after(text: str, anchor: str, addition: str, path: pathlib.Path) -> tuple[str, bool]:
+    if addition in text:
+        return text, False
+    count = text.count(anchor)
+    if count != 1:
+        raise RuntimeError(f"Expected one insertion anchor in {path}, found {count}")
+    return text.replace(anchor, anchor + addition, 1), True
+
+
 def patch_adapter(path: pathlib.Path) -> bool:
-    """Add exact target aliases and source-rewrite rules to upstream's adapter."""
+    """Add exact target aliases, mod-source rewrites, and staged-source shims."""
     text = path.read_text(encoding="utf-8")
     tree = ast.parse(text, filename=str(path))
     renamed_assignment = _top_level_assignment(tree, "RENAMED", path)
@@ -116,81 +102,49 @@ def patch_adapter(path: pathlib.Path) -> bool:
     changed = [tuple(entry) for entry in changed]
 
     replacements: list[tuple[ast.Assign, str]] = []
-    renamed_changed = False
     for old, new in ALIASES.items():
         if old in renamed and renamed[old] != new:
             raise RuntimeError(f"Conflicting mapping for {old!r} in {path}")
-        if renamed.get(old) != new:
-            renamed[old] = new
-            renamed_changed = True
-    if renamed_changed:
-        replacement = ["RENAMED = {\n"]
-        replacement.extend(f"    {key!r}: {value!r},\n" for key, value in renamed.items())
-        replacement.append("}\n")
+        renamed[old] = new
+    replacement = ["RENAMED = {\n"]
+    replacement.extend(f"    {key!r}: {value!r},\n" for key, value in renamed.items())
+    replacement.append("}\n")
+    if ast.literal_eval(renamed_assignment.value) != renamed:
         replacements.append((renamed_assignment, "".join(replacement)))
 
-    changed_changed = False
     for old, new in SOURCE_REWRITES:
         conflicting = [value for key, value in changed if key == old and value != new]
         if conflicting:
             raise RuntimeError(f"Conflicting source rewrite for {old!r} in {path}")
         if (old, new) not in changed:
             changed.append((old, new))
-            changed_changed = True
-    if changed_changed:
-        replacement = ["CHANGED = (\n"]
-        replacement.extend(f"    ({old!r}, {new!r}),\n" for old, new in changed)
-        replacement.append(")\n")
+    replacement = ["CHANGED = (\n"]
+    replacement.extend(f"    ({old!r}, {new!r}),\n" for old, new in changed)
+    replacement.append(")\n")
+    original_changed = [tuple(item) for item in ast.literal_eval(changed_assignment.value)]
+    if original_changed != changed:
         replacements.append((changed_assignment, "".join(replacement)))
 
-    if replacements:
-        path.write_text(_replace_assignments(text, replacements), encoding="utf-8")
+    patched = _replace_assignments(text, replacements) if replacements else text
+    patched, _ = _insert_after(patched, IMPORT_ANCHOR, SHIM_IMPORT, path)
+    patched, _ = _insert_after(patched, MAIN_SOURCE_ANCHOR, SHIM_CALL, path)
+    ast.parse(patched, filename=str(path))
+    if patched != text:
+        path.write_text(patched, encoding="utf-8")
         return True
     return False
 
 
-def _insert_before(path: pathlib.Path, anchor: str, addition: str) -> bool:
-    text = path.read_text(encoding="utf-8")
-    if addition.strip() in text:
+def install_source_helper(source_root: pathlib.Path) -> bool:
+    """Copy the trusted shim module beside the adapter used inside the sandbox."""
+    helper = pathlib.Path(__file__).with_name("native_mod_source_compat.py")
+    target = pathlib.Path(source_root) / SOURCE_HELPER_RELATIVE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = helper.read_bytes()
+    if target.exists() and target.read_bytes() == payload:
         return False
-    count = text.count(anchor)
-    if count != 1:
-        raise RuntimeError(f"Expected one insertion anchor in {path}, found {count}")
-    path.write_text(text.replace(anchor, addition + anchor, 1), encoding="utf-8")
+    target.write_bytes(payload)
     return True
-
-
-def patch_source_compat(source: pathlib.Path) -> bool:
-    """Restore small, behavior-preserving APIs needed by audited native mods."""
-    changed = False
-    widgets = source / "crates/horizon-client-render/src/widgets.rs"
-    changed |= _insert_before(
-        widgets,
-        "/// A labelled widget in GUI pixels (the coordinates screens take input in).\n#[derive(Clone, Debug)]\npub struct Widget {",
-        ACTION_SHIM,
-    )
-
-    ui = source / "crates/horizon-client-render/src/ui.rs"
-    changed |= _insert_before(
-        ui,
-        "/// Button (AbstractButton): nine-slice sprite plus the centred label.\npub fn button(",
-        ACTION_BUTTON_SHIM,
-    )
-
-    text = source / "crates/horizon-client-core/src/text.rs"
-    changed |= _insert_before(text, "    pub fn empty() -> Self {", OPTION_NAME_VALUE_SHIM)
-
-    remote = source / "crates/horizon-client/src/game/remote.rs"
-    remote_text = remote.read_text(encoding="utf-8")
-    old = "    fn menu_slot(menu: &str, slot: i32) -> Option<usize> {"
-    new = "    pub(super) fn menu_slot(menu: &str, slot: i32) -> Option<usize> {"
-    if new not in remote_text:
-        count = remote_text.count(old)
-        if count != 1:
-            raise RuntimeError(f"Expected one menu_slot method in {remote}, found {count}")
-        remote.write_text(remote_text.replace(old, new, 1), encoding="utf-8")
-        changed = True
-    return changed
 
 
 def install_sandbox_hook(path: pathlib.Path) -> bool:
@@ -217,11 +171,16 @@ def main(argv: list[str]) -> int:
     if len(argv) == 2:
         path = pathlib.Path(argv[1])
         adapter_changed = patch_adapter(path)
-        source_changed = patch_source_compat(path.parents[2])
+        helper_changed = install_source_helper(path.parents[2])
+        details = []
+        if adapter_changed:
+            details.append("adapter updated")
+        if helper_changed:
+            details.append("staged-source shim helper installed")
         print(
-            "native_mod_adapt: compatibility patches "
-            f"{'updated' if adapter_changed or source_changed else 'already present'} "
-            f"for {path.parents[2]}"
+            "native_mod_adapt: "
+            + (", ".join(details) if details else "compatibility patches already present")
+            + f" for {path.parents[2]}"
         )
         return 0
     print(
