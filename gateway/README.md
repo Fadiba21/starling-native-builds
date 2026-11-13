@@ -41,7 +41,7 @@ The workflow dispatch is `build.yml` on `main`, with exact inputs `ask`, `versio
 - `GET /` and `GET /health`: return `{"ok":true,"service":"starling-native-gateway"}`.
 - `POST /v1/build?version=V`: accepts the Starling framing format (repeated four-byte big-endian bundle length followed by that `.hnmod` ZIP), up to 32 MiB, and returns `{"job":"<24 lowercase hex>"}`.
 - `GET /v1/job/{ID}`: returns `queued`, `building`, `done`, or `failed`; completed status includes SHA-256, size, and build metadata.
-- `GET /v1/job/{ID}/lib`: returns the raw `libhorizon_android.so`; supports open-ended `Range: bytes=N-` requests.
+- `GET /v1/job/{ID}/lib`: returns the raw `libhorizon_android.so`; `Range: bytes=0-` is treated as a full `200` response so Android can create a fresh `.part` file, while resume ranges from nonzero offsets return `206`.
 - `GET /v1/busy`: returns `{"busy":true|false}`.
 
 The root and health routes prove Worker reachability only. Use `/v1/busy` to exercise Durable Object access, and a synthetic end-to-end build to verify GitHub dispatch, compilation, callback, and download readiness.

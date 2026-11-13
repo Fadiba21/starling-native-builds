@@ -140,9 +140,14 @@ test("source fetch auth, build dispatch, callback auth, verified raw library and
   assert.equal(ranged.headers.get("content-range"), `bytes 4-${so.length - 1}/${so.length}`);
   assert.deepEqual(new Uint8Array(await ranged.arrayBuffer()), so.subarray(4));
   const fromZero = await worker.fetch(new Request(`https://gateway.test/v1/job/${job}/lib`, { headers: { range: "bytes=0-" } }), f.env);
-  assert.equal(fromZero.status, 206);
-  assert.equal(fromZero.headers.get("content-range"), `bytes 0-${so.length - 1}/${so.length}`);
+  assert.equal(fromZero.status, 200);
+  assert.equal(fromZero.headers.get("content-range"), null);
+  assert.equal(fromZero.headers.get("content-length"), String(so.length));
   assert.deepEqual(new Uint8Array(await fromZero.arrayBuffer()), so);
+  const boundedFromZero = await worker.fetch(new Request(`https://gateway.test/v1/job/${job}/lib`, { headers: { range: "bytes=0-5" } }), f.env);
+  assert.equal(boundedFromZero.status, 206);
+  assert.equal(boundedFromZero.headers.get("content-range"), `bytes 0-5/${so.length}`);
+  assert.deepEqual(new Uint8Array(await boundedFromZero.arrayBuffer()), so.subarray(0, 6));
   const bounded = await worker.fetch(new Request(`https://gateway.test/v1/job/${job}/lib`, { headers: { range: "bytes=2-5" } }), f.env);
   assert.equal(bounded.status, 206);
   assert.equal(bounded.headers.get("content-range"), `bytes 2-5/${so.length}`);

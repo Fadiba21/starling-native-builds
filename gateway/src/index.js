@@ -397,10 +397,14 @@ export class GatewayState {
     if (!job || job.state !== "done" || job.expires_at <= Date.now()) return json({ error: "No such thing here." }, 404);
     const total = job.library_size;
     const requestedRange = request.headers.get("range");
+    // Starling's Android client asks for bytes=0- on a fresh download but
+    // opens the .part file in append mode for every 206 response. Ignore this
+    // no-op range so the client gets a normal 200 and creates the file.
+    const ignoreZeroOffsetRange = requestedRange === "bytes=0-";
     let start = 0;
     let end = total - 1;
     let partial = false;
-    if (requestedRange !== null) {
+    if (requestedRange !== null && !ignoreZeroOffsetRange) {
       const range = /^bytes=(\d*)-(\d*)$/.exec(requestedRange);
       if (!range || (!range[1] && !range[2])) return this.rangeNotSatisfiable(total);
       const first = range[1] ? Number(range[1]) : null;
