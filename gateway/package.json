@@ -1,0 +1,12 @@
+{
+  "name": "starling-native-build-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "4.161.0"
+  }
+}

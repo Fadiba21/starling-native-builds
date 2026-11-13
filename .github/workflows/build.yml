@@ -1,24 +1,27 @@
 name: build
 run-name: build ${{ inputs.ask }}
-# One player's native mods, asked for through Starling's gateway (mod_build_gateway.py in
-# starling-client/starling): the mods come from the gateway under a random name, compile in the sandbox
-# with no network, and the result goes back as this run's artifact. A mod's code runs while it compiles,
-# so its token can only read this public repository, and it writes no cache.
+# Native mods are untrusted: mod_build_once.py invokes the upstream sandbox, which
+# compiles without network access or runner credentials. The shared gateway key
+# is scoped only to the post-build callback/transfer step below.
 on:
   workflow_dispatch:
     inputs:
       ask:
-        description: The name the gateway keeps the mods under
+        description: The gateway's 32-character lowercase hexadecimal job key
         required: true
+        type: string
       version:
         description: A version in versions.json
         required: true
+        type: string
       gateway:
-        description: Where the gateway is
+        description: HTTPS origin of the gateway
         required: true
+        type: string
       tools:
         description: The branch of starling-client/starling with the build scripts
         default: starling
+        type: string
 permissions:
   contents: read
 jobs:
@@ -34,12 +37,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Validate callback route
+        id: validate_route
+        run: python3 scripts/validate_inputs.py --route-only
+      - name: Validate dispatch inputs
+        id: validate
+        run: python3 scripts/validate_inputs.py
       - name: The commit and the scripts
         run: bash scripts/prepare.sh
       - name: Make room
-        run: |
-          rm -rf "$HOME/.rustup" "$HOME/.cargo"
-          bash scripts/room.sh
+        run: bash scripts/room.sh
       - uses: actions/cache/restore@v4
         with:
           key: base-${{ env.COMMIT }}
@@ -49,16 +56,37 @@ jobs:
             ~/android
             ~/modbuild/cargo
             ~/modbuild/base
-      - name: The mods
-        run: curl -fsS --retry 5 --retry-all-errors -o mods.bin "$GATEWAY/v1/github/$ASK"
-      - name: Build
+      - name: Fetch mods from gateway
+        run: curl --proto '=https' --tlsv1.2 --max-filesize 33554432 -fsS --retry 5 --retry-all-errors -o mods.bin "$GATEWAY/v1/github/$ASK"
+      - name: Build in upstream no-network sandbox
+        id: compile
+        continue-on-error: true
         env:
           MOD_BUILD_SECONDS: '3200'
         run: python3 tools/mod_build_once.py mods.bin "$COMMIT" result
-      - uses: actions/upload-artifact@v4
+      # This is the only step to which GATEWAY_UPLOAD_KEY is exposed. It runs
+      # after compilation, and also handles earlier preparation/cache failures.
+      - name: Callback and upload result chunks
+        if: ${{ always() && steps.validate_route.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GATEWAY_UPLOAD_KEY: ${{ secrets.GATEWAY_UPLOAD_KEY }}
+          BUILD_STEP_OUTCOME: ${{ steps.compile.outcome }}
+          RESULT_DIR: result
+        run: python3 scripts/upload_result.py
+      # Keep a one-day Actions artifact as a fallback if the callback or transfer
+      # cannot reach the worker. Missing results are expected for pre-build errors.
+      - name: Preserve result artifact fallback
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
         with:
           name: result
           path: result/
           retention-days: 1
           compression-level: 1
-          if-no-files-found: error
+          if-no-files-found: warn
+      - name: Verify build result
+        if: ${{ always() }}
+        env:
+          BUILD_STEP_OUTCOME: ${{ steps.compile.outcome }}
+        run: python3 scripts/check_build.py result
