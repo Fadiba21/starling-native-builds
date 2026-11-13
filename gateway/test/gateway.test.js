@@ -17,7 +17,7 @@ class MemoryStorage {
 
 function fixture() {
   const storage = new MemoryStorage();
-  const durableObject = new GatewayState({ storage, blockConcurrencyWhile: (fn) => fn() }, {});
+  let durableObject;
   const namespace = {
     idFromName: (name) => name,
     get: () => ({ fetch: (input, init) => durableObject.fetch(new Request(input, init)) }),
@@ -31,6 +31,7 @@ function fixture() {
     GITHUB_REF: "main",
     TOOLS_INPUT: "",
   };
+  durableObject = new GatewayState({ storage, blockConcurrencyWhile: (fn) => fn() }, env);
   const dispatches = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -38,7 +39,7 @@ function fixture() {
     return new Response(null, { status: 204 });
   };
   return {
-    env, storage, dispatches,
+    env, storage, dispatches, durableObject,
     restore: () => { globalThis.fetch = originalFetch; },
   };
 }
@@ -199,6 +200,36 @@ test("new builds are rejected only when the free-tier retained-storage budget is
   assert.equal(response.status, 429);
   assert.match((await response.json()).error, /free-tier build storage is full/i);
   assert.equal(f.dispatches.length, 0);
+});
+
+test("durable alarm drains waiting work after a bounded batch of failed dispatches", async (t) => {
+  const f = fixture();
+  t.after(f.restore);
+  const now = Date.now();
+  await f.storage.put("gateway-origin", "https://gateway.test");
+  for (let i = 0; i < 16; i++) {
+    const id = i.toString(16).padStart(24, "0");
+    await f.storage.put(`job:${id}`, {
+      id, ask: i.toString(16).padStart(32, "0"), version: "0.8.0", state: "waiting",
+      created_at: now + i, expires_at: now + 86_400_000,
+      source_bytes: 1, source_chunks: 1, library_size: null,
+    });
+  }
+  let attempts = 0;
+  globalThis.fetch = async () => { attempts++; return new Response(null, { status: 503 }); };
+  await f.durableObject.alarm();
+  let records = [...(await f.storage.list({ prefix: "job:" })).values()];
+  assert.equal(attempts, 14, "one alarm remains bounded");
+  assert.equal(records.filter((j) => j.state === "failed").length, 14);
+  assert.equal(records.filter((j) => j.state === "waiting").length, 2);
+  assert.ok(f.storage.alarmAt <= Date.now() + 30_000, "idle backlog gets a short durable retry");
+  globalThis.fetch = async () => { attempts++; return new Response(null, { status: 204 }); };
+  await f.durableObject.alarm();
+  records = [...(await f.storage.list({ prefix: "job:" })).values()];
+  assert.equal(attempts, 16);
+  assert.equal(records.filter((j) => j.state === "waiting").length, 0);
+  assert.equal(records.filter((j) => j.state === "queued").length, 2);
+  assert.ok(f.storage.alarmAt > Date.now() + 30_000, "no idle retry loop remains after draining");
 });
 
 test("unknown versions are refused and failed uploads cannot become done without SHA verification", async (t) => {

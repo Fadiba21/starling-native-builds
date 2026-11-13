@@ -5,6 +5,7 @@ const MAX_ACTIVE_BUILDS = 14;
 const MAX_RETAINED_BYTES = 4_500_000_000;
 const TTL_MS = 24 * 60 * 60 * 1000;
 const STALE_LEASE_MS = 80 * 60 * 1000;
+const DISPATCH_RETRY_MS = 30 * 1000;
 const JOB_ID = /^[0-9a-f]{24}$/;
 const ASK_ID = /^[0-9a-f]{32}$/;
 const HEX_SHA256 = /^[0-9a-f]{64}$/;
@@ -97,14 +98,14 @@ function authorized(request, env) {
   return mismatch === 0;
 }
 
-async function dispatchNext(env, origin, attempts = 0) {
+async function dispatchNext(env, origin, attempts = 0, store = (path, init) => callStore(env, path, init)) {
   if (attempts >= MAX_ACTIVE_BUILDS) return;
-  const claim = await callStore(env, "/internal/claim");
+  const claim = await store("/internal/claim");
   const job = await claim.json();
   if (!job.job) return;
   const token = env.GITHUB_TOKEN;
   if (!token) {
-    await callStore(env, `/internal/dispatch-result/${job.job}`, {
+    await store(`/internal/dispatch-result/${job.job}`, {
       method: "POST", body: JSON.stringify({ ok: false, error: "GitHub dispatch is not configured." }),
     });
     return;
@@ -138,16 +139,16 @@ async function dispatchNext(env, origin, attempts = 0) {
     response = null;
   }
   if (response?.status === 204) {
-    await callStore(env, `/internal/dispatch-result/${job.job}`, {
+    await store(`/internal/dispatch-result/${job.job}`, {
       method: "POST", body: JSON.stringify({ ok: true }),
     });
-    return dispatchNext(env, origin, attempts + 1);
+    return dispatchNext(env, origin, attempts + 1, store);
   }
-  await callStore(env, `/internal/dispatch-result/${job.job}`, {
+  await store(`/internal/dispatch-result/${job.job}`, {
     method: "POST", body: JSON.stringify({ ok: false, error: "GitHub Actions could not accept the build." }),
   });
   // A failed dispatch frees a runner slot; continue through bounded queued work.
-  return dispatchNext(env, origin, attempts + 1);
+  return dispatchNext(env, origin, attempts + 1, store);
 }
 
 async function publicRoute(request, env, url) {
@@ -172,6 +173,7 @@ async function publicRoute(request, env, url) {
         "x-job-id": id,
         "x-version": version,
         "x-commit": commit,
+        "x-gateway-origin": url.origin,
       },
       body,
     });
@@ -262,6 +264,7 @@ export class GatewayState {
   constructor(state, env) {
     this.state = state;
     this.storage = state.storage;
+    this.env = env;
   }
 
   async fetch(request) {
@@ -291,6 +294,8 @@ export class GatewayState {
     const commit = request.headers.get("x-commit");
     if (!JOB_ID.test(id || "") || !VERSIONS[version] || VERSIONS[version] !== commit || bytes.length < 1 || bytes.length > MAX_REQUEST_BYTES) return json({ error: "Invalid build request." }, 400);
     return this.state.blockConcurrencyWhile(async () => {
+      const origin = request.headers.get("x-gateway-origin");
+      if (origin && /^https:\/\/[^/?#]+$/.test(origin)) await this.storage.put("gateway-origin", origin);
       await this.cleanupExpired();
       const old = await this.storage.get(`job:${id}`);
       if (old) return json({ created: false, job: id });
@@ -344,6 +349,7 @@ export class GatewayState {
       await this.deleteLibraryChunks(job);
     }
     await this.storage.put(`job:${jobId}`, job);
+    await this.scheduleCleanup();
     return json({ ok: true });
   }
 
@@ -583,17 +589,27 @@ export class GatewayState {
   }
 
   async scheduleCleanup() {
-    const jobs = await this.storage.list({ prefix: "job:" });
-    const expiries = Array.from(jobs.values()).map((job) => job.expires_at);
-    if (expiries.length) await this.storage.setAlarm(Math.min(...expiries));
+    const jobs = Array.from((await this.storage.list({ prefix: "job:" })).values());
+    const deadlines = jobs.map((job) => job.expires_at);
+    const active = jobs.filter((job) => ["dispatching", "queued", "building", "uploading"].includes(job.state));
+    for (const job of active) deadlines.push((job.lease_at || job.started_at || job.created_at) + STALE_LEASE_MS);
+    if (jobs.some((job) => job.state === "waiting") && active.length < MAX_ACTIVE_BUILDS) {
+      deadlines.push(Date.now() + DISPATCH_RETRY_MS);
+    }
+    if (deadlines.length) await this.storage.setAlarm(Math.max(Date.now() + 1, Math.min(...deadlines)));
   }
 
   async alarm() {
+    let origin;
     await this.state.blockConcurrencyWhile(async () => {
       await this.cleanupExpired();
       await this.reapStaleUnlocked();
+      origin = await this.storage.get("gateway-origin");
       await this.scheduleCleanup();
     });
+    // Direct internal calls avoid a Durable Object self-fetch cycle. Each alarm
+    // still dispatches at most 14 jobs, within the Free subrequest budget.
+    if (origin) await dispatchNext(this.env, origin, 0, (path, init) => this.fetch(new Request(`https://state.internal${path}`, init)));
   }
 }
 
