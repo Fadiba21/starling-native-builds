@@ -26,7 +26,7 @@ npx wrangler secret put UPLOAD_KEY
 
 `GITHUB_TOKEN` is a fine-grained token scoped only to `Fadiba21/starling-native-builds` and permitted to invoke `workflow_dispatch` (Actions: write). It is held only by the Worker and is never included in workflow inputs or passed to the compiler.
 
-Set repository Actions secret `GATEWAY_UPLOAD_KEY` to the same independently generated high-entropy value as the Worker `UPLOAD_KEY` secret. The workflow should expose it only to its trusted status/upload callback step after the sandbox exits—not to the sandbox process, build scripts, mod source, or artifact contents. Never print the secret in logs. The Worker cannot set the repository secret itself.
+Set repository Actions secret `GATEWAY_UPLOAD_KEY` to the same independently generated high-entropy value as the Worker `UPLOAD_KEY` secret. The workflow exposes it step-locally to the trusted source-fetch request and the status/upload callback step—not to the compiler sandbox, build scripts, mod source, or artifact contents. Never print the secret in logs. The Worker cannot set the repository secret itself.
 
 The workflow dispatch is `build.yml` on `main` with exact inputs `ask`, `version`, `gateway`, `tools`. `TOOLS_INPUT` defaults to an empty string; the workflow treats blank as its default toolchain selector. Configure it in `wrangler.toml` only if the workflow defines a non-empty selector.
 
@@ -39,7 +39,7 @@ Android-facing routes retain the upstream shapes:
 - `GET /v1/job/{ID}/lib`: raw `libhorizon_android.so`; accepts open-ended `Range: bytes=N-` and returns 206/Content-Range for valid nonzero offsets.
 - `GET /v1/busy`: `{"busy":true|false}`.
 
-The workflow callback/source API and exact request JSON are documented in [INTEGRATION.md](./INTEGRATION.md). Callback status and part uploads require `Authorization: Bearer $UPLOAD_KEY`. `GET /v1/github/{ASK}` deliberately has no auth: `ASK` is a random 128-bit, 32-hex capability (matching the upstream GitHub runner source-fetch design) and expires after 24 hours. Parts are zero-indexed and 1 MiB except the final part. The Worker checks part count, exact chunk lengths, metadata, and the final whole-library SHA-256 before exposing a job as `done`.
+The workflow callback/source API and exact request JSON are documented in [INTEGRATION.md](./INTEGRATION.md). Source fetch, callback status, and part uploads require `Authorization: Bearer $UPLOAD_KEY`; source fetch returns the exact stored request bytes. `ASK` is a random 128-bit, 32-hex capability and expires after 24 hours, but the workflow is in a public GitHub repository: dispatch inputs including `ask` and workflow logs are not private. The run name omits `ask` to avoid one duplicate exposure; this gateway is not a private service. Parts are zero-indexed and 1 MiB except the final part. The Worker checks part count, exact chunk lengths, metadata, and the final whole-library SHA-256 before exposing a job as `done`.
 
 ## Tests
 

@@ -1,10 +1,10 @@
 # Starling native build workflow
 
-This repository draft adapts the public [`starling-client/mod-builds`](https://github.com/starling-client/mod-builds) source (upstream snapshot `869989193102c33a061314eabf5b0a7b6c3442b3`) for the public `Fadiba21/starling-native-builds` repository. The trusted base-cache workflow and upstream `scripts/`/`versions.json` are retained. `build.yml` keeps the upstream `mod_build_once.py` → `mod_build_sandbox.sh` route; native mod compilation runs in the upstream isolated, no-network sandbox. Checkout does not persist credentials, repository permissions are read-only, and `GATEWAY_UPLOAD_KEY` is scoped exclusively to the post-build callback/upload step.
+This repository draft adapts the public [`starling-client/mod-builds`](https://github.com/starling-client/mod-builds) source (upstream snapshot `869989193102c33a061314eabf5b0a7b6c3442b3`) for the public `Fadiba21/starling-native-builds` repository. The trusted base-cache workflow and upstream `scripts/`/`versions.json` are retained. `build.yml` keeps the upstream `mod_build_once.py` → `mod_build_sandbox.sh` route; native mod compilation runs in the upstream isolated, no-network sandbox. Checkout does not persist credentials, repository permissions are read-only, and `GATEWAY_UPLOAD_KEY` is scoped to the trusted source-fetch and post-build callback/upload steps, never the compiler sandbox.
 
 ## Gateway interface implemented
 
-`workflow_dispatch` takes `ask`, `version`, `gateway`, and `tools`. The ask must be exactly 32 lowercase hexadecimal characters; version must be present in `versions.json`; gateway must be an HTTPS origin without a path/query; and `tools` must be a valid upstream Git branch name. Values are read from environment variables and validated before they're used. `GET /v1/github/{ASK}` returns the binary mods input.
+`workflow_dispatch` takes `ask`, `version`, `gateway`, and `tools`. The ask must be exactly 32 lowercase hexadecimal characters; version must be present in `versions.json`; gateway must be an HTTPS origin without a path/query; and `tools` must be a valid upstream Git branch name. Values are read from environment variables and validated before they're used. `GET /v1/github/{ASK}` returns the original binary mods input only with `Authorization: Bearer $GATEWAY_UPLOAD_KEY`; the fetch step receives the secret locally and does not pass it into compilation.
 
 After the compiler step (including on earlier preparation/cache failures), the callback step uses `Authorization: Bearer $GATEWAY_UPLOAD_KEY`:
 
@@ -13,7 +13,7 @@ After the compiler step (including on earlier preparation/cache failures), the c
 - `POST /v1/internal/job/{ASK}/status` with `{"state":"done","sha256":"…","size":N,"build":{…},"parts":N,"chunk_size":1048576}` after local hash/size verification and all parts are accepted.
 - For build/pre-build failures, `POST` the official `{"state":"failed","error":"…","settled":false}` shape (the upstream `settled` value is retained for native compile failures). Error text for infrastructure/pre-build failures is generic.
 
-All callback attempts are best effort; a one-day Actions result artifact is retained as fallback. The post-build step never prints the bearer key, does not follow redirects, and does not expose the key to the compiler. The tests use a mocked HTTP transport and fixture library bytes; they do not run an expensive native build or require a secret.
+All callback attempts are best effort; a one-day Actions result artifact is retained as fallback. The source-fetch and post-build steps do not print the bearer key or follow redirects, and neither exposes the key to the compiler. This is still a public GitHub Actions repository: `workflow_dispatch` inputs including `ask` remain visible to repository viewers, and workflow logs must not be treated as private. The run name omits `ask` to avoid duplicating it there, but the authenticated gateway source route is not a private service boundary. The tests use a mocked HTTP transport and fixture library bytes; they do not run an expensive native build or require a secret.
 
 ## Base cache and testing
 

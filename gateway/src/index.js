@@ -221,7 +221,10 @@ async function callbackRoute(request, env, url) {
 
   // The random ask id is a short-lived capability, just like the upstream GitHub runner endpoint.
   const source = /^\/v1\/github\/([0-9a-f]{32})$/.exec(path)?.[1];
-  if (request.method === "GET" && source) return callStore(env, `/internal/source/${source}`);
+  if (request.method === "GET" && source) {
+    if (!authorized(request, env)) return json({ error: "Unauthorized." }, 401);
+    return callStore(env, `/internal/source/${source}`);
+  }
   return json({ error: "No such thing here." }, 404);
 }
 

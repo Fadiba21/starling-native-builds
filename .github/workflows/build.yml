@@ -1,8 +1,8 @@
 name: build
-run-name: build ${{ inputs.ask }}
+run-name: build
 # Native mods are untrusted: mod_build_once.py invokes the upstream sandbox, which
 # compiles without network access or runner credentials. The shared gateway key
-# is scoped only to the post-build callback/transfer step below.
+# is scoped only to the trusted source-fetch and callback/upload steps below.
 on:
   workflow_dispatch:
     inputs:
@@ -57,15 +57,19 @@ jobs:
             ~/modbuild/cargo
             ~/modbuild/base
       - name: Fetch mods from gateway
-        run: curl --proto '=https' --tlsv1.2 --max-filesize 33554432 -fsS --retry 5 --retry-all-errors -o mods.bin "$GATEWAY/v1/github/$ASK"
+        env:
+          GATEWAY_UPLOAD_KEY: ${{ secrets.GATEWAY_UPLOAD_KEY }}
+        run: |
+          curl --proto '=https' --tlsv1.2 --max-filesize 33554432 -fsS --retry 5 --retry-all-errors -H "Authorization: Bearer $GATEWAY_UPLOAD_KEY" -o mods.bin "$GATEWAY/v1/github/$ASK"
+          curl --proto '=https' --tlsv1.2 -fsS -H "Authorization: Bearer $GATEWAY_UPLOAD_KEY" -H 'Content-Type: application/json' --data '{"state":"building"}' -o /dev/null "$GATEWAY/v1/internal/job/$ASK/status" || echo "Gateway build-status notification failed; continuing."
       - name: Build in upstream no-network sandbox
         id: compile
         continue-on-error: true
         env:
           MOD_BUILD_SECONDS: '3200'
         run: python3 tools/mod_build_once.py mods.bin "$COMMIT" result
-      # This is the only step to which GATEWAY_UPLOAD_KEY is exposed. It runs
-      # after compilation, and also handles earlier preparation/cache failures.
+      # The key is also exposed to the trusted source-fetch step above; neither
+      # trusted step passes it to the compiler sandbox. This handles earlier preparation/cache failures.
       - name: Callback and upload result chunks
         if: ${{ always() && steps.validate_route.outcome == 'success' }}
         continue-on-error: true

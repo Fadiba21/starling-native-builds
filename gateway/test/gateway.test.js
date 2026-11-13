@@ -82,7 +82,7 @@ test("incremental SHA-256 matches standard vectors across split updates", () => 
   assert.equal(streamed.hex(), digest(large));
 });
 
-test("build dispatch, random source capability, callback auth, verified raw library and Range", async (t) => {
+test("source fetch auth, build dispatch, callback auth, verified raw library and Range", async (t) => {
   const f = fixture();
   t.after(f.restore);
   const source = bundleBody("opaque framed native mod bytes");
@@ -100,10 +100,15 @@ test("build dispatch, random source capability, callback auth, verified raw libr
   const ask = dispatch.payload.inputs.ask;
   assert.match(ask, /^[0-9a-f]{32}$/);
 
-  const sourceResponse = await worker.fetch(new Request(`https://gateway.test/v1/github/${ask}`), f.env);
+  const sourceUrl = `https://gateway.test/v1/github/${ask}`;
+  const sourceUnauthenticated = await worker.fetch(new Request(sourceUrl), f.env);
+  assert.equal(sourceUnauthenticated.status, 401);
+  const sourceWrongKey = await worker.fetch(new Request(sourceUrl, { headers: { authorization: "Bearer wrong-key" } }), f.env);
+  assert.equal(sourceWrongKey.status, 401);
+  const sourceResponse = await worker.fetch(new Request(sourceUrl, { headers: auth }), f.env);
   assert.equal(sourceResponse.status, 200);
   assert.deepEqual(new Uint8Array(await sourceResponse.arrayBuffer()), source);
-  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/github/${"0".repeat(32)}`), f.env)).status, 404);
+  assert.equal((await worker.fetch(new Request(`https://gateway.test/v1/github/${"0".repeat(32)}`, { headers: auth }), f.env)).status, 404);
 
   const unauthorized = await worker.fetch(new Request(`https://gateway.test/v1/internal/job/${ask}/status`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ state: "building" }),
