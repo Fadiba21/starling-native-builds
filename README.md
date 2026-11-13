@@ -26,3 +26,6 @@ python3 -m unittest discover -s tests -v
 ```
 
 The test workflow runs only input-validation and mocked upload tests. It does not restore build caches, invoke the game compiler, use secrets, or contact the gateway.
+
+## Cache keepalive
+The `cache keepalive` workflow is configured for 03:17 UTC every Tuesday and Friday and can also be run with `workflow_dispatch`. It only restores the existing trusted `base-COMMIT` cache; it does not build native mods or save or repair caches. If the cache is evicted or missing, run the manual `base` workflow for version `0.8.0` with tools branch `starling` to rebuild it.

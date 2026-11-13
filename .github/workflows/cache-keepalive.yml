@@ -1,0 +1,84 @@
+name: cache keepalive
+
+on:
+  schedule:
+    - cron: '17 3 * * 2,5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: matrix
+        name: Validate versions and build restore matrix
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError(f"duplicate version key: {key!r}")
+                  result[key] = value
+              return result
+
+          versions = json.loads(
+              Path("versions.json").read_text(encoding="utf-8"),
+              object_pairs_hook=unique_object,
+          )
+          if not isinstance(versions, dict) or not versions:
+              raise ValueError("versions.json must be a non-empty object")
+
+          version_re = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+          commit_re = re.compile(r"[0-9a-f]{40}\Z")
+          entries = set()
+          for version, commit in versions.items():
+              if not isinstance(version, str) or not version_re.fullmatch(version):
+                  raise ValueError(f"invalid version: {version!r}")
+              if not isinstance(commit, str) or not commit_re.fullmatch(commit):
+                  raise ValueError(f"invalid 40-character commit for {version!r}")
+              entries.add((version, commit))
+
+          matrix = {"include": [
+              {"version": version, "commit": commit}
+              for version, commit in sorted(entries)
+          ]}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
+          PY
+
+  restore:
+    needs: versions
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.versions.outputs.matrix) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Make room
+        run: bash scripts/room.sh clean
+      - uses: actions/cache/restore@v4
+        with:
+          key: base-${{ matrix.commit }}
+          fail-on-cache-miss: true
+          path: |
+            ~/.rustup
+            ~/android
+            ~/modbuild/cargo
+            ~/modbuild/base
